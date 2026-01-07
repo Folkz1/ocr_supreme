@@ -572,15 +572,17 @@ async def process_file(file: UploadFile = File(...)) -> ProcessResponse:
             total_files = len(processed_files)
             successfully_processed = sum(1 for f in processed_files if f.status == "processed")
 
-            # Retorna como ProcessResponse para manter compatibilidade com o endpoint
-            # Convertendo os dados do arquivo compactado para o formato esperado
-            archive_summary = f"Arquivo compactado processado: {successfully_processed}/{total_files} arquivos.\n\n"
-            archive_details = "\n".join([
-                f"[{f.path_in_archive}] Status: {f.status}" + (f" - {f.error}" if f.error else "")
-                for f in processed_files[:10]  # Limita a 10 para não ficar muito grande
-            ])
-            if total_files > 10:
-                archive_details += f"\n... e mais {total_files - 10} arquivos"
+            # Retorna como ProcessResponse com o texto extraído de cada arquivo
+            all_texts = []
+            for f in processed_files:
+                if f.extracted_text:
+                    all_texts.append(f"=== {f.path_in_archive} ===\n{f.extracted_text}")
+                elif f.error:
+                    all_texts.append(f"=== {f.path_in_archive} ===\n[ERRO: {f.error}]")
+                else:
+                    all_texts.append(f"=== {f.path_in_archive} ===\n[Sem texto extraído]")
+
+            combined_text = "\n\n".join(all_texts)
 
             return ProcessResponse(
                 filename=file.filename,
@@ -588,7 +590,7 @@ async def process_file(file: UploadFile = File(...)) -> ProcessResponse:
                 message=f"Arquivo compactado (.{archive_type}) processado com sucesso. {successfully_processed}/{total_files} arquivos extraídos.",
                 data=DataResponse(
                     content_type="text/plain",
-                    content=archive_summary + archive_details
+                    content=combined_text
                 )
             )
 
