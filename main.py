@@ -17,6 +17,9 @@ import shutil
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Request
 from pydantic import BaseModel
 
+# --- Configuração do rarfile para usar unar ---
+rarfile.UNRAR_TOOL = "unar"
+
 # --- Configuráveis por ENV (para a triagem de PDF) ---
 PAGE_TEXT_THRESHOLD = int(os.getenv("PAGE_TEXT_THRESHOLD", "50"))
 OCR_PAGE_CHAR_THRESHOLD = int(os.getenv("OCR_PAGE_CHAR_THRESHOLD", "15"))
