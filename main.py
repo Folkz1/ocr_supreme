@@ -499,8 +499,35 @@ async def process_file(file: UploadFile = File(...)) -> ProcessResponse:
     """
     contents = await file.read()
 
-    # Verifica se é um arquivo compactado
-    is_archive, archive_type = is_archive_file(file.filename, contents)
+    # Debug: mostra informações do arquivo recebido
+    print(f"DEBUG: Arquivo recebido: {file.filename}, tamanho: {len(contents)} bytes")
+    print(f"DEBUG: Primeiros bytes: {contents[:20] if contents else 'vazio'}")
+
+    # Verifica se é um arquivo compactado - prioriza detecção por assinatura
+    is_archive = False
+    archive_type = ''
+
+    # Detecta ZIP pela assinatura (PK) - mais confiável que extensão
+    if contents and contents.startswith(b'PK'):
+        try:
+            if zipfile.is_zipfile(io.BytesIO(contents)):
+                is_archive = True
+                archive_type = 'zip'
+                print(f"DEBUG: Detectado como ZIP pela assinatura PK")
+        except Exception as e:
+            print(f"DEBUG: Erro ao verificar ZIP: {e}")
+
+    # Detecta RAR pela assinatura
+    if not is_archive and contents and contents.startswith(b'Rar!\x1a\x07'):
+        is_archive = True
+        archive_type = 'rar'
+        print(f"DEBUG: Detectado como RAR pela assinatura")
+
+    # Se não detectou pela assinatura, tenta pela extensão
+    if not is_archive:
+        is_archive, archive_type = is_archive_file(file.filename, contents)
+        if is_archive:
+            print(f"DEBUG: Detectado como {archive_type} pela extensão")
 
     if is_archive:
         # Processa como arquivo compactado diretamente
