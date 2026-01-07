@@ -1,5 +1,8 @@
 FROM python:3.10-slim
 
+# FORCE REBUILD: 2026-01-07-v3.1.1
+ARG CACHEBUST=1
+
 # Define variáveis de ambiente para a aplicação
 ENV APP_DIR=/app \
     PORT=8000 \
@@ -24,10 +27,10 @@ COPY requirements.txt .
 # Instala as dependências Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copia o código da aplicação (versão 3.1.0 - fix ZIP detection)
-ARG APP_VERSION=3.1.0
+# FORCE NO CACHE - Copia código da aplicação
+ARG APP_VERSION=3.1.1
 ENV APP_VERSION=${APP_VERSION}
-COPY main.py .
+ADD main.py /app/main.py
 
 # Expõe a porta do container
 EXPOSE ${PORT}

@@ -75,7 +75,7 @@ class ArchiveProcessResponse(BaseModel):
     files: List[ArchiveFileInfo]
 
 # --- App FastAPI ---
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.1.1"
 app = FastAPI(
     title="Hub de Processamento de Documentos",
     description="Processa XML, PDF, Imagens, Planilhas, DOCX, HTML, TXT e arquivos compactados (.zip, .rar) para extração de texto.",
