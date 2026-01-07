@@ -24,7 +24,9 @@ COPY requirements.txt .
 # Instala as dependências Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copia o código da aplicação
+# Copia o código da aplicação (versão 3.1.0 - fix ZIP detection)
+ARG APP_VERSION=3.1.0
+ENV APP_VERSION=${APP_VERSION}
 COPY main.py .
 
 # Expõe a porta do container

@@ -75,11 +75,17 @@ class ArchiveProcessResponse(BaseModel):
     files: List[ArchiveFileInfo]
 
 # --- App FastAPI ---
+APP_VERSION = "3.1.0"
 app = FastAPI(
     title="Hub de Processamento de Documentos",
     description="Processa XML, PDF, Imagens, Planilhas, DOCX, HTML, TXT e arquivos compactados (.zip, .rar) para extração de texto.",
-    version="3.0.0"
+    version=APP_VERSION
 )
+
+@app.on_event("startup")
+async def startup_event():
+    print(f"=== OCR Supreme v{APP_VERSION} iniciado ===")
+    print(f"=== Detecção de ZIP por assinatura ATIVA ===")
 
 # --- Funções de Processamento para cada formato ---
 
@@ -731,14 +737,14 @@ async def process_archive(file: UploadFile = File(...)) -> ArchiveProcessRespons
 @app.get("/health")
 async def health_check():
     """Endpoint de health check para verificar se o serviço está funcionando."""
-    return {"status": "healthy", "version": "3.0.0"}
+    return {"status": "healthy", "version": APP_VERSION}
 
 @app.get("/")
 async def root():
     """Endpoint raiz com informações sobre a API."""
     return {
         "name": "Hub de Processamento de Documentos",
-        "version": "3.0.0",
+        "version": APP_VERSION,
         "description": "API para processamento de documentos e arquivos compactados",
         "endpoints": {
             "/process-file/": "Processa um arquivo individual",
