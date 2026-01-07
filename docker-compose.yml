@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  ocr-supreme:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ocr-supreme
+    ports:
+      - "8000:8000"
+    environment:
+      - API_KEY=${API_KEY}
+      - API_KEY_HEADER_NAME=${API_KEY_HEADER_NAME:-X-API-Key}
+      - PORT=${PORT:-8000}
+      - PAGE_TEXT_THRESHOLD=${PAGE_TEXT_THRESHOLD:-50}
+      - OCR_PAGE_CHAR_THRESHOLD=${OCR_PAGE_CHAR_THRESHOLD:-15}
+      - RENDER_SCALE=${RENDER_SCALE:-2.0}
+      - OCR_LANG=${OCR_LANG:-por+eng}
+      - OCR_MAX_PAGES_TO_CHECK=${OCR_MAX_PAGES_TO_CHECK:-10}
+      - MAX_IMAGE_FRAMES=${MAX_IMAGE_FRAMES:-5}
+      - MAX_RECURSION_DEPTH=${MAX_RECURSION_DEPTH:-10}
+    volumes:
+      - ./uploads:/app/uploads
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - ocr-network
+
+networks:
+  ocr-network:
+    driver: bridge
+
+volumes:
+  uploads:
+    driver: local
