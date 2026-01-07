@@ -236,13 +236,37 @@ def triage_pdf_fail_fast(contents: bytes):
 
 # --- Funções para processamento de arquivos compactados ---
 
-def is_archive_file(filename: str) -> Tuple[bool, str]:
+def is_archive_file(filename: str, contents: bytes = None) -> Tuple[bool, str]:
     """Verifica se o arquivo é um arquivo compactado suportado."""
     lower_name = filename.lower()
+
+    # Verifica pela extensão
     if lower_name.endswith('.zip'):
-        return True, 'zip'
+        # Se temos o conteúdo, valida se é realmente um ZIP
+        if contents:
+            try:
+                if zipfile.is_zipfile(io.BytesIO(contents)):
+                    return True, 'zip'
+            except Exception:
+                pass
+        else:
+            return True, 'zip'
     elif lower_name.endswith('.rar'):
         return True, 'rar'
+
+    # Se não detectou pela extensão, tenta detectar pela assinatura
+    if contents:
+        try:
+            # Verifica assinatura ZIP (PK\x03\x04 ou PK\x05\x06)
+            if contents.startswith(b'PK\x03\x04') or contents.startswith(b'PK\x05\x06'):
+                if zipfile.is_zipfile(io.BytesIO(contents)):
+                    return True, 'zip'
+            # Verifica assinatura RAR (Rar!\x1a\x07)
+            elif contents.startswith(b'Rar!\x1a\x07'):
+                return True, 'rar'
+        except Exception:
+            pass
+
     return False, ''
 
 def extract_archive_recursive(contents: bytes, archive_type: str, current_path: str = "", depth: int = 0) -> List[Dict]:
@@ -280,7 +304,7 @@ def extract_archive_recursive(contents: bytes, archive_type: str, current_path: 
                         file_contents = archive.read(file_info.filename)
 
                         # Verifica se é outro arquivo compactado
-                        is_archive, nested_archive_type = is_archive_file(file_info.filename)
+                        is_archive, nested_archive_type = is_archive_file(file_info.filename, file_contents)
 
                         if is_archive:
                             # Extrai recursivamente
@@ -328,7 +352,7 @@ def extract_archive_recursive(contents: bytes, archive_type: str, current_path: 
                             file_contents = archive.read(file_info.filename)
 
                             # Verifica se é outro arquivo compactado
-                            is_archive, nested_archive_type = is_archive_file(file_info.filename)
+                            is_archive, nested_archive_type = is_archive_file(file_info.filename, file_contents)
 
                             if is_archive:
                                 # Extrai recursivamente
@@ -382,6 +406,28 @@ def process_file_content(filename: str, contents: bytes) -> Tuple[str, Optional[
     """
     try:
         mime_type = magic.from_buffer(contents, mime=True)
+        original_mime = mime_type
+
+        # Se o mime_type é octet-stream, tenta detectar pela extensão do arquivo
+        if mime_type == "application/octet-stream":
+            lower_filename = filename.lower()
+            if lower_filename.endswith('.pdf'):
+                mime_type = "application/pdf"
+            elif lower_filename.endswith(('.xls', '.xlsx')):
+                mime_type = "application/vnd.ms-excel"
+            elif lower_filename.endswith('.docx'):
+                mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            elif lower_filename.endswith(('.xml',)):
+                mime_type = "application/xml"
+            elif lower_filename.endswith(('.html', '.htm')):
+                mime_type = "text/html"
+            elif lower_filename.endswith(('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.gif')):
+                mime_type = "image/jpeg"  # Genérico para imagens
+            elif lower_filename.endswith(('.txt', '.csv')):
+                mime_type = "text/plain"
+
+            if mime_type != original_mime:
+                print(f"Ajustado mime_type de {original_mime} para {mime_type} baseado na extensão do arquivo: {filename}")
 
         # Verifica assinaturas
         is_pdf_signature = contents.startswith(b"%PDF")
@@ -452,11 +498,68 @@ async def process_file(file: UploadFile = File(...)) -> ProcessResponse:
     contents = await file.read()
 
     # Verifica se é um arquivo compactado
-    is_archive, archive_type = is_archive_file(file.filename)
+    is_archive, archive_type = is_archive_file(file.filename, contents)
 
     if is_archive:
-        # Redireciona para o endpoint de arquivos compactados
-        return await process_archive(file)
+        # Processa como arquivo compactado diretamente
+        try:
+            # Extrai arquivos recursivamente
+            extracted_files = extract_archive_recursive(contents, archive_type)
+
+            # Processa cada arquivo extraído
+            processed_files = []
+            for file_info in extracted_files:
+                if file_info.get("status") == "error":
+                    processed_files.append(ArchiveFileInfo(
+                        filename=file_info.get("filename", "unknown"),
+                        path_in_archive=file_info.get("path_in_archive", ""),
+                        size=file_info.get("size", 0),
+                        status="error",
+                        error=file_info.get("error")
+                    ))
+                    continue
+
+                # Processa o conteúdo do arquivo
+                status, extracted_text, error = process_file_content(
+                    file_info["filename"],
+                    file_info["contents"]
+                )
+
+                processed_files.append(ArchiveFileInfo(
+                    filename=file_info["filename"],
+                    path_in_archive=file_info["path_in_archive"],
+                    size=file_info["size"],
+                    extracted_text=extracted_text,
+                    status=status,
+                    error=error
+                ))
+
+            total_files = len(processed_files)
+            successfully_processed = sum(1 for f in processed_files if f.status == "processed")
+
+            # Retorna como ProcessResponse para manter compatibilidade com o endpoint
+            # Convertendo os dados do arquivo compactado para o formato esperado
+            archive_summary = f"Arquivo compactado processado: {successfully_processed}/{total_files} arquivos.\n\n"
+            archive_details = "\n".join([
+                f"[{f.path_in_archive}] Status: {f.status}" + (f" - {f.error}" if f.error else "")
+                for f in processed_files[:10]  # Limita a 10 para não ficar muito grande
+            ])
+            if total_files > 10:
+                archive_details += f"\n... e mais {total_files - 10} arquivos"
+
+            return ProcessResponse(
+                filename=file.filename,
+                status="processed",
+                message=f"Arquivo compactado (.{archive_type}) processado com sucesso. {successfully_processed}/{total_files} arquivos extraídos.",
+                data=DataResponse(
+                    content_type="text/plain",
+                    content=archive_summary + archive_details
+                )
+            )
+
+        except Exception as e:
+            print(f"Erro ao processar arquivo compactado {file.filename}: {e}")
+            raise HTTPException(status_code=500, detail=f"Erro ao processar arquivo compactado: {str(e)}")
 
     # Processa arquivo normal
     mime_type = magic.from_buffer(contents, mime=True)
@@ -542,7 +645,7 @@ async def process_archive(file: UploadFile = File(...)) -> ArchiveProcessRespons
     contents = await file.read()
 
     # Verifica o tipo de arquivo
-    is_archive, archive_type = is_archive_file(file.filename)
+    is_archive, archive_type = is_archive_file(file.filename, contents)
 
     if not is_archive:
         raise HTTPException(status_code=400, detail="Arquivo não é um arquivo compactado suportado (.zip ou .rar)")
