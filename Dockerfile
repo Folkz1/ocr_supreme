@@ -35,9 +35,9 @@ ADD main.py /app/main.py
 # Expõe a porta do container
 EXPOSE ${PORT}
 
-# Health check
+# Health check - usa GET em vez de HEAD (--spider)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/health || exit 1
+    CMD wget --no-verbose --tries=1 -O /dev/null http://localhost:${PORT}/health || exit 1
 
 # Inicia a aplicação usando o servidor Uvicorn
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
