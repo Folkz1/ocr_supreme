@@ -240,29 +240,31 @@ def is_archive_file(filename: str, contents: bytes = None) -> Tuple[bool, str]:
     """Verifica se o arquivo é um arquivo compactado suportado."""
     lower_name = filename.lower()
 
-    # Verifica pela extensão
+    # Verifica pela extensão primeiro - extensão tem prioridade
     if lower_name.endswith('.zip'):
-        # Se temos o conteúdo, valida se é realmente um ZIP
+        # Se temos conteúdo, tenta validar, mas retorna True mesmo se falhar
         if contents:
             try:
-                if zipfile.is_zipfile(io.BytesIO(contents)):
+                # Verifica assinatura ZIP ou usa zipfile
+                if contents.startswith(b'PK') or zipfile.is_zipfile(io.BytesIO(contents)):
                     return True, 'zip'
             except Exception:
                 pass
-        else:
+            # Mesmo se a validação falhar, confia na extensão
             return True, 'zip'
-    elif lower_name.endswith('.rar'):
+        return True, 'zip'
+
+    if lower_name.endswith('.rar'):
         return True, 'rar'
 
-    # Se não detectou pela extensão, tenta detectar pela assinatura
+    # Se não detectou pela extensão, tenta detectar pela assinatura do conteúdo
     if contents:
         try:
             # Verifica assinatura ZIP (PK\x03\x04 ou PK\x05\x06)
             if contents.startswith(b'PK\x03\x04') or contents.startswith(b'PK\x05\x06'):
-                if zipfile.is_zipfile(io.BytesIO(contents)):
-                    return True, 'zip'
+                return True, 'zip'
             # Verifica assinatura RAR (Rar!\x1a\x07)
-            elif contents.startswith(b'Rar!\x1a\x07'):
+            if contents.startswith(b'Rar!\x1a\x07'):
                 return True, 'rar'
         except Exception:
             pass
