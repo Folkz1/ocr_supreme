@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import fitz  # PyMuPDF
 from typing import Optional, List, Dict, Tuple
 import magic
@@ -75,7 +76,7 @@ class ArchiveProcessResponse(BaseModel):
     files: List[ArchiveFileInfo]
 
 # --- App FastAPI ---
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.2.1"
 app = FastAPI(
     title="Hub de Processamento de Documentos",
     description="Processa XML, PDF, Imagens, Planilhas, DOCX, HTML, TXT e arquivos compactados (.zip, .rar) para extração de texto.",
@@ -86,6 +87,85 @@ app = FastAPI(
 async def startup_event():
     print(f"=== OCR Supreme v{APP_VERSION} iniciado ===")
     print(f"=== Detecção de ZIP por assinatura ATIVA ===")
+
+# --- Funções de Pós-Processamento de Texto ---
+
+def clean_ocr_text_for_ai(text: str) -> str:
+    """
+    Limpa e normaliza texto extraído por OCR para análise por IA.
+    
+    Melhorias aplicadas:
+    - Remove caracteres de controle e ruídos comuns do OCR
+    - Normaliza espaços em branco (múltiplos espaços, tabs, etc)
+    - Corrige quebras de linha excessivas
+    - Remove linhas vazias repetidas
+    - Corrige problemas comuns de OCR (l vs I, O vs 0, etc em contextos específicos)
+    - Preserva estrutura de parágrafos
+    - Remove caracteres especiais problemáticos mantendo pontuação útil
+    
+    Args:
+        text: Texto bruto extraído do OCR
+        
+    Returns:
+        Texto limpo e normalizado para análise por IA
+    """
+    if not text or not text.strip():
+        return ""
+    
+    # Remove caracteres de controle (exceto \n, \r, \t)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    
+    # Remove caracteres Unicode problemáticos (marcadores, símbolos raros)
+    text = re.sub(r'[\ufeff\u200b-\u200f\u202a-\u202e]', '', text)
+    
+    # Normaliza diferentes tipos de aspas
+    text = text.replace('"', '"').replace('"', '"')
+    text = text.replace(''', "'").replace(''', "'")
+    
+    # Normaliza travessões e hífens
+    text = text.replace('–', '-').replace('—', '-')
+    
+    # Remove espaços antes de pontuação
+    text = re.sub(r'\s+([.,;:!?)])', r'\1', text)
+    
+    # Adiciona espaço após pontuação se não houver
+    text = re.sub(r'([.,;:!?])([^\s\d])', r'\1 \2', text)
+    
+    # Corrige espaços múltiplos (mas preserva quebras de linha)
+    text = re.sub(r'[ \t]+', ' ', text)
+    
+    # Normaliza quebras de linha: máximo 2 consecutivas (para preservar parágrafos)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
+    # Remove espaços no início e fim de cada linha
+    lines = [line.strip() for line in text.split('\n')]
+    text = '\n'.join(lines)
+    
+    # Remove linhas que são apenas pontuação ou caracteres especiais
+    lines = [line for line in text.split('\n') if not re.match(r'^[^\w\s]+$', line)]
+    text = '\n'.join(lines)
+    
+    # Corrige problemas comuns de OCR em números
+    # Exemplo: "l0" -> "10", "O5" -> "05" quando em contexto numérico
+    text = re.sub(r'\bl(\d)', r'1\1', text)  # l seguido de dígito -> 1
+    text = re.sub(r'(\d)l\b', r'\g<1>1', text)  # dígito seguido de l -> 1
+    text = re.sub(r'\bO(\d)', r'0\1', text)  # O seguido de dígito -> 0
+    
+    # Remove linhas muito curtas que são provavelmente ruído (menos de 3 caracteres)
+    # mas preserva números e códigos importantes
+    lines = []
+    for line in text.split('\n'):
+        if len(line.strip()) >= 3 or re.match(r'^\d+$', line.strip()) or not line.strip():
+            lines.append(line)
+    text = '\n'.join(lines)
+    
+    # Remove espaços no início e fim do texto completo
+    text = text.strip()
+    
+    # Garante que não há múltiplos espaços em branco
+    text = re.sub(r' {2,}', ' ', text)
+    
+    return text
 
 # --- Funções de Processamento para cada formato ---
 
@@ -140,9 +220,12 @@ def process_image_ocr(contents: bytes) -> str:
                     texts.append(pytesseract.image_to_string(img, lang=OCR_LANG))
                 except Exception:
                     continue
-            return "\n".join(filter(None, (t or "" for t in texts)))
+            raw_text = "\n".join(filter(None, (t or "" for t in texts)))
         else:
-            return pytesseract.image_to_string(img, lang=OCR_LANG)
+            raw_text = pytesseract.image_to_string(img, lang=OCR_LANG)
+        
+        # Aplica limpeza para melhorar qualidade para IA
+        return clean_ocr_text_for_ai(raw_text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro no OCR da imagem: {e}")
 
@@ -195,7 +278,9 @@ def process_pdf_force_ocr(contents: bytes) -> Tuple[str, str, Dict]:
         final_text = "\n\n".join(accumulated_text)
         
         if final_text.strip():
-            return "processed", final_text, debug
+            # Aplica limpeza para melhorar qualidade para IA
+            cleaned_text = clean_ocr_text_for_ai(final_text)
+            return "processed", cleaned_text, debug
         else:
             return "ocr_failed", "", debug
             

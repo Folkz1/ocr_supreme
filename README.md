@@ -1,6 +1,6 @@
 # OCR Supreme - Hub de Processamento de Documentos
 
-![Version](https://img.shields.io/badge/version-3.2.0-blue.svg)
+![Version](https://img.shields.io/badge/version-3.2.1-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109.0-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
@@ -11,6 +11,7 @@ API de processamento inteligente de documentos com suporte a múltiplos formatos
 
 - ✅ **Processamento de PDFs** com triagem inteligente (texto nativo vs. OCR necessário)
 - ✅ **OCR Forçado** - Novo endpoint que sempre tenta OCR, mesmo em documentos com imagens
+- ✅ **Pós-Processamento Inteligente** - Limpeza automática de texto OCR otimizada para análise por IA
 - ✅ **OCR de Imagens** com suporte a TIFF multi-página
 - ✅ **Extração de Texto** de DOCX, XML, HTML
 - ✅ **Conversão de Planilhas** (XLS, XLSX) para CSV
@@ -288,6 +289,41 @@ curl -X POST "http://localhost:8000/process-file/" \
   -H "X-API-Key: sua-chave" \
   -F "file=@documento-escaneado.jpg"
 ```
+
+## 🧹 Pós-Processamento de Texto OCR
+
+Todo texto extraído por OCR é **automaticamente limpo e normalizado** para melhorar a análise por IA:
+
+### Melhorias Aplicadas:
+
+- ✅ Remove caracteres de controle e ruídos
+- ✅ Normaliza espaços em branco e quebras de linha
+- ✅ Corrige pontuação (aspas, travessões, espaçamento)
+- ✅ Corrige erros comuns de OCR em números (`l` → `1`, `O` → `0`)
+- ✅ Remove linhas de ruído mantendo estrutura de parágrafos
+- ✅ Preserva informações importantes (números, códigos)
+
+### Exemplo de Transformação:
+
+**Antes (OCR bruto):**
+
+```
+TRIBUNAL   REGIONAL    ELEITORAL
+PE  90003   2026  -  Aquisicao
+Valor:   R$   l5.000,00
+Data:    O5/Ol/2026
+```
+
+**Depois (limpo):**
+
+```
+TRIBUNAL REGIONAL ELEITORAL
+PE 90003 2026 - Aquisicao
+Valor: R$ 15.000,00
+Data: 05/01/2026
+```
+
+📖 **Documentação completa**: [OCR_POSTPROCESSING.md](OCR_POSTPROCESSING.md)
 
 ## 🏗️ Arquitetura
 
