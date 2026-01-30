@@ -75,7 +75,7 @@ class ArchiveProcessResponse(BaseModel):
     files: List[ArchiveFileInfo]
 
 # --- App FastAPI ---
-APP_VERSION = "3.1.1"
+APP_VERSION = "3.2.0"
 app = FastAPI(
     title="Hub de Processamento de Documentos",
     description="Processa XML, PDF, Imagens, Planilhas, DOCX, HTML, TXT e arquivos compactados (.zip, .rar) para extração de texto.",
@@ -151,6 +151,56 @@ def process_text(contents: bytes) -> str:
     return contents.decode('utf-8', errors='ignore')
 
 # --- Lógica de Triagem Específica para PDF ---
+
+def process_pdf_force_ocr(contents: bytes) -> Tuple[str, str, Dict]:
+    """
+    Processa PDF forçando OCR em todas as páginas, ignorando detecção de imagens.
+    Tenta extrair texto de todas as páginas usando OCR quando necessário.
+    
+    Returns:
+        Tupla (status, text_content, debug_info)
+    """
+    accumulated_text = []
+    debug = {"pages_scanned": 0, "pages_ocr_applied": 0, "total_pages": 0}
+    
+    try:
+        pdf = fitz.open(stream=contents, filetype="pdf")
+        total_pages = pdf.page_count
+        debug["total_pages"] = total_pages
+        
+        for i in range(total_pages):
+            debug["pages_scanned"] += 1
+            page = pdf.load_page(i)
+            
+            # Primeiro tenta extrair texto nativo
+            page_text = (page.get_text("text") or "").strip()
+            
+            # Se não há texto suficiente, aplica OCR
+            if len(page_text) < PAGE_TEXT_THRESHOLD:
+                debug["pages_ocr_applied"] += 1
+                img = render_page_to_pil(page, scale=RENDER_SCALE)
+                text_from_image = quick_ocr_on_image(img, lang=OCR_LANG)
+                
+                if text_from_image:
+                    accumulated_text.append(text_from_image)
+                elif page_text:
+                    # Se OCR não retornou nada mas havia algum texto, usa o texto
+                    accumulated_text.append(page_text)
+            else:
+                # Usa o texto nativo
+                accumulated_text.append(page_text)
+        
+        pdf.close()
+        
+        final_text = "\n\n".join(accumulated_text)
+        
+        if final_text.strip():
+            return "processed", final_text, debug
+        else:
+            return "ocr_failed", "", debug
+            
+    except Exception as e:
+        return "error", "", {"error": str(e)}
 
 def render_page_to_pil(page: fitz.Page, scale: float) -> Image.Image:
     mat = fitz.Matrix(scale, scale)
@@ -495,6 +545,105 @@ def process_file_content(filename: str, contents: bytes) -> Tuple[str, Optional[
     except Exception as e:
         return "error", None, str(e)
 
+def process_file_content_force_ocr(filename: str, contents: bytes) -> Tuple[str, Optional[str], Optional[str]]:
+    """
+    Processa o conteúdo de um arquivo e extrai texto, SEMPRE tentando OCR quando aplicável.
+    Ignora detecção de imagens e força OCR em PDFs e imagens.
+    
+    Returns:
+        Tupla (status, extracted_text, error)
+    """
+    try:
+        mime_type = magic.from_buffer(contents, mime=True)
+        original_mime = mime_type
+
+        # Se o mime_type é octet-stream, tenta detectar pela extensão do arquivo
+        if mime_type == "application/octet-stream":
+            lower_filename = filename.lower()
+            if lower_filename.endswith('.pdf'):
+                mime_type = "application/pdf"
+            elif lower_filename.endswith(('.xls', '.xlsx')):
+                mime_type = "application/vnd.ms-excel"
+            elif lower_filename.endswith('.docx'):
+                mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            elif lower_filename.endswith(('.xml',)):
+                mime_type = "application/xml"
+            elif lower_filename.endswith(('.html', '.htm')):
+                mime_type = "text/html"
+            elif lower_filename.endswith(('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.gif')):
+                mime_type = "image/jpeg"  # Genérico para imagens
+            elif lower_filename.endswith(('.txt', '.csv')):
+                mime_type = "text/plain"
+
+            if mime_type != original_mime:
+                print(f"[force_ocr] Ajustado mime_type de {original_mime} para {mime_type} baseado na extensão do arquivo: {filename}")
+
+        # Verifica assinaturas
+        is_pdf_signature = contents.startswith(b"%PDF")
+        is_zip = False
+        zip_names = []
+
+        try:
+            is_zip = zipfile.is_zipfile(io.BytesIO(contents))
+            if is_zip:
+                with zipfile.ZipFile(io.BytesIO(contents)) as zf:
+                    zip_names = zf.namelist()
+        except Exception:
+            pass
+
+        # PDF - FORÇA OCR
+        if ("pdf" in mime_type) or is_pdf_signature:
+            status, text_content, debug = process_pdf_force_ocr(contents)
+            
+            if status == "processed":
+                return "processed", text_content, None
+            elif status == "ocr_failed":
+                return "requires_external_ocr", None, "OCR local falhou"
+            else:
+                return "error", None, debug.get("error", "Erro ao processar PDF")
+
+        # Planilhas
+        elif "sheet" in mime_type or "excel" in mime_type or (is_zip and "xl/workbook.xml" in zip_names):
+            csv_content = process_spreadsheet(contents)
+            return "processed", csv_content, None
+
+        # DOCX
+        elif ("vnd.openxmlformats-officedocument.wordprocessingml.document" in mime_type) or (is_zip and ("word/document.xml" in zip_names)):
+            text_content = process_docx(contents)
+            return "processed", text_content, None
+
+        # XML
+        elif mime_type in ("application/xml", "text/xml"):
+            text_content = process_xml(contents)
+            return "processed", text_content, None
+
+        # HTML
+        elif "html" in mime_type:
+            text_content = process_html(contents)
+            return "processed", text_content, None
+
+        # Imagens - FORÇA OCR
+        elif "image" in mime_type:
+            try:
+                text_content = process_image_ocr(contents)
+                if text_content and text_content.strip():
+                    return "processed", text_content, None
+                else:
+                    return "requires_external_ocr", None, "OCR não extraiu texto"
+            except Exception as e:
+                return "requires_external_ocr", None, f"Erro no OCR: {str(e)}"
+
+        # Texto
+        elif "text" in mime_type:
+            text_content = process_text(contents)
+            return "processed", text_content, None
+
+        else:
+            return "unsupported", None, f"Tipo de arquivo não suportado: {mime_type}"
+
+    except Exception as e:
+        return "error", None, str(e)
+
 # --- Endpoints ---
 
 @app.post("/process-file/", response_model=ProcessResponse, dependencies=[Depends(verify_api_key)])
@@ -673,6 +822,238 @@ async def process_file(file: UploadFile = File(...)) -> ProcessResponse:
         print(f"Erro ao processar o arquivo {file.filename}: {e}")
         raise HTTPException(status_code=500, detail=f"Ocorreu um erro interno ao processar o arquivo. Detalhe: {str(e)}")
 
+@app.post("/onlyocr/", response_model=ProcessResponse, dependencies=[Depends(verify_api_key)])
+async def only_ocr(file: UploadFile = File(...)) -> ProcessResponse:
+    """
+    Endpoint que sempre tenta fazer OCR de todos os documentos, mesmo com imagens.
+    Só escala para processamento externo se o OCR falhar completamente.
+    Funciona exatamente como /process-file mas ignora a detecção de imagens.
+    """
+    contents = await file.read()
+
+    # Debug: mostra informações do arquivo recebido
+    print(f"DEBUG [onlyocr]: Arquivo recebido: {file.filename}, tamanho: {len(contents)} bytes")
+    print(f"DEBUG [onlyocr]: Primeiros bytes: {contents[:20] if contents else 'vazio'}")
+
+    # Verifica se é um arquivo compactado - prioriza detecção por assinatura
+    is_archive = False
+    archive_type = ''
+
+    # Detecta ZIP pela assinatura (PK) - mais confiável que extensão
+    if contents and contents.startswith(b'PK'):
+        try:
+            if zipfile.is_zipfile(io.BytesIO(contents)):
+                is_archive = True
+                archive_type = 'zip'
+                print(f"DEBUG [onlyocr]: Detectado como ZIP pela assinatura PK")
+        except Exception as e:
+            print(f"DEBUG [onlyocr]: Erro ao verificar ZIP: {e}")
+
+    # Detecta RAR pela assinatura
+    if not is_archive and contents and contents.startswith(b'Rar!\x1a\x07'):
+        is_archive = True
+        archive_type = 'rar'
+        print(f"DEBUG [onlyocr]: Detectado como RAR pela assinatura")
+
+    # Se não detectou pela assinatura, tenta pela extensão
+    if not is_archive:
+        is_archive, archive_type = is_archive_file(file.filename, contents)
+        if is_archive:
+            print(f"DEBUG [onlyocr]: Detectado como {archive_type} pela extensão")
+
+    if is_archive:
+        # Processa como arquivo compactado diretamente
+        try:
+            # Extrai arquivos recursivamente
+            extracted_files = extract_archive_recursive(contents, archive_type)
+
+            # Processa cada arquivo extraído com OCR forçado
+            processed_files = []
+            for file_info in extracted_files:
+                if file_info.get("status") == "error":
+                    processed_files.append(ArchiveFileInfo(
+                        filename=file_info.get("filename", "unknown"),
+                        path_in_archive=file_info.get("path_in_archive", ""),
+                        size=file_info.get("size", 0),
+                        status="error",
+                        error=file_info.get("error")
+                    ))
+                    continue
+
+                # Processa o conteúdo do arquivo com OCR forçado
+                status, extracted_text, error = process_file_content_force_ocr(
+                    file_info["filename"],
+                    file_info["contents"]
+                )
+
+                processed_files.append(ArchiveFileInfo(
+                    filename=file_info["filename"],
+                    path_in_archive=file_info["path_in_archive"],
+                    size=file_info["size"],
+                    extracted_text=extracted_text,
+                    status=status,
+                    error=error
+                ))
+
+            total_files = len(processed_files)
+            successfully_processed = sum(1 for f in processed_files if f.status == "processed")
+
+            # Retorna como ProcessResponse com o texto extraído de cada arquivo
+            all_texts = []
+            for f in processed_files:
+                if f.extracted_text:
+                    all_texts.append(f"=== {f.path_in_archive} ===\n{f.extracted_text}")
+                elif f.error:
+                    all_texts.append(f"=== {f.path_in_archive} ===\n[ERRO: {f.error}]")
+                else:
+                    all_texts.append(f"=== {f.path_in_archive} ===\n[Sem texto extraído]")
+
+            combined_text = "\n\n".join(all_texts)
+
+            return ProcessResponse(
+                filename=file.filename,
+                status="processed",
+                message=f"Arquivo compactado (.{archive_type}) processado com sucesso. {successfully_processed}/{total_files} arquivos extraídos.",
+                data=DataResponse(
+                    content_type="text/plain",
+                    content=combined_text
+                )
+            )
+
+        except Exception as e:
+            print(f"Erro ao processar arquivo compactado {file.filename}: {e}")
+            raise HTTPException(status_code=500, detail=f"Erro ao processar arquivo compactado: {str(e)}")
+
+    # Processa arquivo normal com OCR forçado
+    mime_type = magic.from_buffer(contents, mime=True)
+    is_pdf_signature = contents.startswith(b"%PDF")
+    is_zip = False
+    zip_names = []
+
+    try:
+        is_zip = zipfile.is_zipfile(io.BytesIO(contents))
+        if is_zip:
+            with zipfile.ZipFile(io.BytesIO(contents)) as zf:
+                zip_names = zf.namelist()
+    except Exception:
+        pass
+
+    print(f"[onlyocr] Arquivo recebido: {file.filename}, Tipo MIME: {mime_type}, is_pdf_sig={is_pdf_signature}, is_zip={is_zip}")
+
+    try:
+        # PDF - SEMPRE tenta OCR, ignora detecção de imagens
+        if ("pdf" in mime_type) or is_pdf_signature:
+            status, text_content, debug = process_pdf_force_ocr(contents)
+            print(f"[onlyocr] PDF Force OCR debug info: {debug}")
+
+            if status == "processed":
+                return ProcessResponse(
+                    filename=file.filename,
+                    status="processed",
+                    message="PDF processado com sucesso usando OCR.",
+                    data=DataResponse(content_type="text/plain", content=text_content)
+                )
+            elif status == "ocr_failed":
+                # Só escala se o OCR falhou completamente
+                return ProcessResponse(
+                    filename=file.filename,
+                    status="requires_external_ocr",
+                    message="OCR local falhou. Necessário processamento externo (Textract).",
+                    data=DataResponse()
+                )
+            else:  # error
+                return ProcessResponse(
+                    filename=file.filename,
+                    status="error",
+                    message=f"Erro ao processar PDF: {debug.get('error', 'Erro desconhecido')}",
+                    data=DataResponse()
+                )
+
+        # Planilhas
+        elif "sheet" in mime_type or "excel" in mime_type or (is_zip and "xl/workbook.xml" in zip_names):
+            csv_content = process_spreadsheet(contents)
+            return ProcessResponse(
+                filename=file.filename,
+                status="processed",
+                message="Planilha convertida para CSV com sucesso.",
+                data=DataResponse(content_type="text/csv", content=csv_content)
+            )
+
+        # DOCX
+        elif ("vnd.openxmlformats-officedocument.wordprocessingml.document" in mime_type) or (is_zip and ("word/document.xml" in zip_names)):
+            text_content = process_docx(contents)
+            return ProcessResponse(
+                filename=file.filename,
+                status="processed",
+                message="DOCX processado com sucesso.",
+                data=DataResponse(content_type="text/plain", content=text_content)
+            )
+
+        # XML
+        elif mime_type in ("application/xml", "text/xml"):
+            text_content = process_xml(contents)
+            return ProcessResponse(
+                filename=file.filename,
+                status="processed",
+                message="XML processado com sucesso.",
+                data=DataResponse(content_type="text/plain", content=text_content)
+            )
+
+        # HTML
+        elif "html" in mime_type:
+            text_content = process_html(contents)
+            return ProcessResponse(
+                filename=file.filename,
+                status="processed",
+                message="HTML processado com sucesso.",
+                data=DataResponse(content_type="text/plain", content=text_content)
+            )
+
+        # Imagens - SEMPRE tenta OCR
+        elif "image" in mime_type:
+            try:
+                text_content = process_image_ocr(contents)
+                if text_content and text_content.strip():
+                    return ProcessResponse(
+                        filename=file.filename,
+                        status="processed",
+                        message="Imagem processada com OCR com sucesso.",
+                        data=DataResponse(content_type="text/plain", content=text_content)
+                    )
+                else:
+                    return ProcessResponse(
+                        filename=file.filename,
+                        status="requires_external_ocr",
+                        message="OCR local não extraiu texto. Necessário processamento externo.",
+                        data=DataResponse()
+                    )
+            except Exception as e:
+                return ProcessResponse(
+                    filename=file.filename,
+                    status="requires_external_ocr",
+                    message=f"Erro no OCR local: {str(e)}. Necessário processamento externo.",
+                    data=DataResponse()
+                )
+
+        # Texto
+        elif "text" in mime_type:
+            text_content = process_text(contents)
+            return ProcessResponse(
+                filename=file.filename,
+                status="processed",
+                message="Arquivo de texto processado com sucesso.",
+                data=DataResponse(content_type="text/plain", content=text_content)
+            )
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Tipo de arquivo não suportado: {mime_type}.")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Erro ao processar o arquivo {file.filename}: {e}")
+        raise HTTPException(status_code=500, detail=f"Ocorreu um erro interno ao processar o arquivo. Detalhe: {str(e)}")
+
 @app.post("/process-archive/", response_model=ArchiveProcessResponse, dependencies=[Depends(verify_api_key)])
 async def process_archive(file: UploadFile = File(...)) -> ArchiveProcessResponse:
     """
@@ -750,6 +1131,7 @@ async def root():
         "description": "API para processamento de documentos e arquivos compactados",
         "endpoints": {
             "/process-file/": "Processa um arquivo individual",
+            "/onlyocr/": "Processa um arquivo sempre tentando OCR (ignora detecção de imagens)",
             "/process-archive/": "Processa arquivos compactados (.zip, .rar) recursivamente",
             "/health": "Verifica o status do serviço"
         }
