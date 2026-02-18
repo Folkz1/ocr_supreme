@@ -76,7 +76,7 @@ class ArchiveProcessResponse(BaseModel):
     files: List[ArchiveFileInfo]
 
 # --- App FastAPI ---
-APP_VERSION = "3.2.1"
+APP_VERSION = "3.2.3"
 app = FastAPI(
     title="Hub de Processamento de Documentos",
     description="Processa XML, PDF, Imagens, Planilhas, DOCX, HTML, TXT e arquivos compactados (.zip, .rar) para extração de texto.",
@@ -263,7 +263,8 @@ def process_pdf_force_ocr(contents: bytes) -> Tuple[str, str, Dict]:
                 debug["pages_ocr_applied"] += 1
                 img = render_page_to_pil(page, scale=RENDER_SCALE)
                 text_from_image = quick_ocr_on_image(img, lang=OCR_LANG)
-                
+                del img  # Libera a imagem PIL da memória imediatamente
+
                 if text_from_image:
                     accumulated_text.append(text_from_image)
                 elif page_text:
@@ -478,18 +479,32 @@ def extract_archive_recursive(contents: bytes, archive_type: str, current_path: 
                         })
 
         elif archive_type == 'rar':
+            print(f"[RAR] Iniciando extração de RAR (tamanho: {len(contents)} bytes)")
+            print(f"[RAR] Criando arquivo temporário...")
+            
             with tempfile.NamedTemporaryFile(delete=False, suffix=".rar") as tmp:
                 tmp.write(contents)
                 tmp.flush()
                 tmp_path = tmp.name
 
+            print(f"[RAR] Arquivo temporário criado: {tmp_path}")
+
             try:
+                print(f"[RAR] Abrindo RAR com rarfile.RarFile...")
+                print(f"[RAR] UNRAR_TOOL configurado: {rarfile.UNRAR_TOOL}")
+                
                 with rarfile.RarFile(tmp_path) as archive:
-                    for file_info in archive.infolist():
+                    print(f"[RAR] RAR aberto com sucesso!")
+                    
+                    file_list = archive.infolist()
+                    print(f"[RAR] Encontrados {len(file_list)} arquivos dentro do RAR")
+                    
+                    for file_info in file_list:
                         if file_info.isdir():
                             continue
 
                         file_path = os.path.join(current_path, file_info.filename) if current_path else file_info.filename
+                        print(f"[RAR] Extraindo: {file_info.filename}")
 
                         try:
                             file_contents = archive.read(file_info.filename)
@@ -524,14 +539,23 @@ def extract_archive_recursive(contents: bytes, archive_type: str, current_path: 
                                 "status": "error",
                                 "error": str(e)
                             })
+            except Exception as rar_error:
+                print(f"[RAR] ERRO CRÍTICO ao processar RAR: {type(rar_error).__name__}: {rar_error}")
+                import traceback
+                print(f"[RAR] Traceback:\n{traceback.format_exc()}")
+                raise
             finally:
                 if os.path.exists(tmp_path):
                     try:
                         os.unlink(tmp_path)
-                    except Exception:
-                        pass
+                        print(f"[RAR] Arquivo temporário removido: {tmp_path}")
+                    except Exception as cleanup_error:
+                        print(f"[RAR] Erro ao remover temporário: {cleanup_error}")
 
     except Exception as e:
+        print(f"[RAR] ERRO GERAL na extração: {type(e).__name__}: {e}")
+        import traceback
+        print(f"[RAR] Traceback:\n{traceback.format_exc()}")
         extracted_files.append({
             "filename": current_path or "root",
             "status": "error",
@@ -948,9 +972,12 @@ async def only_ocr(file: UploadFile = File(...)) -> ProcessResponse:
 
     if is_archive:
         # Processa como arquivo compactado diretamente
+        print(f"DEBUG [onlyocr]: Iniciando processamento de arquivo compactado tipo={archive_type}")
         try:
             # Extrai arquivos recursivamente
+            print(f"DEBUG [onlyocr]: Chamando extract_archive_recursive...")
             extracted_files = extract_archive_recursive(contents, archive_type)
+            print(f"DEBUG [onlyocr]: Extração concluída, {len(extracted_files)} arquivos extraídos")
 
             # Processa cada arquivo extraído com OCR forçado
             processed_files = []
@@ -965,11 +992,17 @@ async def only_ocr(file: UploadFile = File(...)) -> ProcessResponse:
                     ))
                     continue
 
-                # Processa o conteúdo do arquivo com OCR forçado
-                status, extracted_text, error = process_file_content_force_ocr(
-                    file_info["filename"],
-                    file_info["contents"]
-                )
+                # Remove contents do dict imediatamente para liberar memória após o processamento
+                file_contents = file_info.pop("contents", None)
+                try:
+                    status, extracted_text, error = process_file_content_force_ocr(
+                        file_info["filename"],
+                        file_contents
+                    )
+                except MemoryError:
+                    status, extracted_text, error = "error", None, "Memória insuficiente para processar o arquivo"
+                finally:
+                    del file_contents
 
                 processed_files.append(ArchiveFileInfo(
                     filename=file_info["filename"],
@@ -1170,11 +1203,17 @@ async def process_archive(file: UploadFile = File(...)) -> ArchiveProcessRespons
                 ))
                 continue
 
-            # Processa o conteúdo do arquivo
-            status, extracted_text, error = process_file_content(
-                file_info["filename"],
-                file_info["contents"]
-            )
+            # Remove contents do dict imediatamente para liberar memória após o processamento
+            file_contents = file_info.pop("contents", None)
+            try:
+                status, extracted_text, error = process_file_content(
+                    file_info["filename"],
+                    file_contents
+                )
+            except MemoryError:
+                status, extracted_text, error = "error", None, "Memória insuficiente para processar o arquivo"
+            finally:
+                del file_contents
 
             processed_files.append(ArchiveFileInfo(
                 filename=file_info["filename"],

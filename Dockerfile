@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# FORCE REBUILD: 2026-01-07-v3.1.1
+# FORCE REBUILD: 2026-02-17-v3.2.3
 ARG CACHEBUST=1
 
 # Define variáveis de ambiente para a aplicação
@@ -28,7 +28,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # FORCE NO CACHE - Copia código da aplicação
-ARG APP_VERSION=3.1.1
+ARG APP_VERSION=3.2.3
 ENV APP_VERSION=${APP_VERSION}
 ADD main.py /app/main.py
 
@@ -40,4 +40,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 -O /dev/null http://localhost:${PORT}/health || exit 1
 
 # Inicia a aplicação usando o servidor Uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
